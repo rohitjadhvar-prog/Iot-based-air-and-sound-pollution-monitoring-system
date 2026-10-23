@@ -1,0 +1,295 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <math.h>
+
+// =========================
+// PIN DEFINITIONS
+// =========================
+
+#define MQ135_PIN 34
+#define SOUND_PIN 35
+
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+
+#define BUZZER_PIN 25
+#define GREEN_LED 26
+#define RED_LED 27
+
+// =========================
+// LCD
+// =========================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// =========================
+// DHT11
+// =========================
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// =========================
+// VARIABLES
+// =========================
+
+float AQI = 0;
+float soundDB = 0;
+float temperature = 0;
+float humidity = 0;
+
+// Pollution limits
+const float AQI_LIMIT = 100.0;
+const float SOUND_LIMIT = 75.0;
+
+// Sound calibration offset
+float SOUND_OFFSET = 45.0;
+
+// =========================
+// AQI CALCULATION
+// =========================
+
+float calculateAQI(int sensorValue)
+{
+  float aqi;
+
+  if (sensorValue <= 800)
+  {
+    aqi = map(sensorValue, 0, 800, 0, 50);
+  }
+  else if (sensorValue <= 1400)
+  {
+    aqi = map(sensorValue, 800, 1400, 51, 100);
+  }
+  else if (sensorValue <= 2000)
+  {
+    aqi = map(sensorValue, 1400, 2000, 101, 150);
+  }
+  else if (sensorValue <= 2800)
+  {
+    aqi = map(sensorValue, 2000, 2800, 151, 200);
+  }
+  else if (sensorValue <= 3500)
+  {
+    aqi = map(sensorValue, 2800, 3500, 201, 300);
+  }
+  else
+  {
+    aqi = map(sensorValue, 3500, 4095, 301, 500);
+  }
+
+  return aqi;
+}
+
+// =========================
+// SOUND LEVEL CALCULATION
+// =========================
+
+float readSoundDB()
+{
+  const int samples = 200;
+
+  int minimum = 4095;
+  int maximum = 0;
+
+  for (int i = 0; i < samples; i++)
+  {
+    int value = analogRead(SOUND_PIN);
+
+    if (value < minimum)
+      minimum = value;
+
+    if (value > maximum)
+      maximum = value;
+
+    delayMicroseconds(500);
+  }
+
+  int peakToPeak = maximum - minimum;
+
+  if (peakToPeak < 1)
+    peakToPeak = 1;
+
+  float db = SOUND_OFFSET + (20.0 * log10(peakToPeak));
+
+  return db;
+}
+
+// =========================
+// SETUP
+// =========================
+
+void setup()
+{
+  // Serial Monitor
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println(" AIR & SOUND POLLUTION MONITOR ");
+  Serial.println("================================");
+
+  // Pin modes
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  // Initial states
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  // ESP32 ADC
+  analogReadResolution(12);
+
+  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  analogSetPinAttenuation(SOUND_PIN, ADC_11db);
+
+  // Start DHT11
+  dht.begin();
+
+  // Start LCD
+  lcd.init();
+  lcd.backlight();
+
+  // Static LCD text
+  // These lines are written ONLY once.
+  lcd.setCursor(0, 0);
+  lcd.print("AQI:    S:   dB");
+
+  lcd.setCursor(0, 1);
+  lcd.print("T:     C H:   %");
+
+  Serial.println("System started.");
+  Serial.println("Reading sensors...");
+}
+
+// =========================
+// MAIN LOOP
+// =========================
+
+void loop()
+{
+  // =========================
+  // READ MQ-135
+  // =========================
+
+  int airValue = analogRead(MQ135_PIN);
+
+  AQI = calculateAQI(airValue);
+
+  // =========================
+  // READ SOUND SENSOR
+  // =========================
+
+  soundDB = readSoundDB();
+
+  // =========================
+  // READ DHT11
+  // =========================
+
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+
+  // Check DHT11
+  if (isnan(temperature) || isnan(humidity))
+  {
+    Serial.println("DHT11 reading error!");
+    delay(2000);
+    return;
+  }
+
+  // =========================
+  // SERIAL MONITOR
+  // =========================
+
+  Serial.println();
+  Serial.println("--------------------------------");
+
+  Serial.print("AQI: ");
+  Serial.println(AQI, 0);
+
+  Serial.print("Sound: ");
+  Serial.print(soundDB, 1);
+  Serial.println(" dB");
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 1);
+  Serial.println(" C");
+
+  Serial.print("Humidity: ");
+  Serial.print(humidity, 1);
+  Serial.println(" %");
+
+  // =========================
+  // POLLUTION STATUS
+  // =========================
+
+  bool airHigh = AQI > AQI_LIMIT;
+  bool soundHigh = soundDB > SOUND_LIMIT;
+
+  if (airHigh || soundHigh)
+  {
+    // HIGH POLLUTION
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BUZZER_PIN, HIGH);
+
+    Serial.println("STATUS: HIGH POLLUTION");
+  }
+  else
+  {
+    // NORMAL
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    Serial.println("STATUS: NORMAL");
+  }
+
+  // =========================
+  // UPDATE LCD VALUES ONLY
+  // =========================
+  //
+  // IMPORTANT:
+  // No lcd.clear() is used.
+  // Labels remain fixed.
+  // Only numbers are replaced.
+  //
+
+  // AQI
+  lcd.setCursor(4, 0);
+  lcd.print("   ");
+
+  lcd.setCursor(4, 0);
+  lcd.print((int)AQI);
+
+  // Sound
+  lcd.setCursor(9, 0);
+  lcd.print("   ");
+
+  lcd.setCursor(9, 0);
+  lcd.print((int)soundDB);
+
+  // Temperature
+  lcd.setCursor(2, 1);
+  lcd.print("    ");
+
+  lcd.setCursor(2, 1);
+  lcd.print(temperature, 1);
+
+  // Humidity
+  lcd.setCursor(10, 1);
+  lcd.print("   ");
+
+  lcd.setCursor(10, 1);
+  lcd.print((int)humidity);
+
+  // =========================
+  // WAIT
+  // =========================
+
+  delay(2000);
+}
